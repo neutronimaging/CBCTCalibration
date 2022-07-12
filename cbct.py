@@ -200,13 +200,15 @@ def estimate_cor(e2):
         x_centres.append(e2[i][0])
         y_centres.append(e2[i][1])
     theta=np.polyfit(y_centres, x_centres, 1)
+                
     plt.scatter(y_centres,x_centres)
     plt.plot(theta[1]+theta[0]*np.array(y_centres),x_centres ,'r')
     plt.show()
     print("The parameters of the COR obtained are as follows:",(theta[1]))
     tilt = np.arctan(theta[0])*180/np.pi
     print("The tilt of the center of rotation is in degrees: ", tilt)
-    
+    result ={"COR" : theta[1], "Ctilt" : tilt}
+    return result
     
 def estimate_magnification(tcal,idx):
     cog=findBeadsWS(tcal[idx,:,:])
@@ -238,13 +240,31 @@ def plot_allellipses(e2):
 def estimate_piercingpoint(e2):
     radius=[]
     height=[]
+    
     for i in range(len(e2)):
         radius.append(e2[i][3])
         height.append(e2[i][1])
+        
+    theta =[]
+    temp_r= radius.copy()
+    temp_h= height.copy()
+    k=0
+    while k!=1:
+        count=0
+        theta=np.polyfit(height, radius, 1)
+        radius= temp_r.copy()
+        height= temp_h.copy()
+        for x,y in zip(height, radius):
+            if (theta[1]+theta[0]*x >= y+0.5 or theta[1]+theta[0]*x <= y-0.5):
+                count=count+1
+                temp_h.remove(x)
+                temp_r.remove(y)
+        if count ==0:
+            k=1
     plt.plot(height,radius,'.')
     plt.xlabel('height')
     plt.ylabel('radius(minor axis length)')
-    theta=np.polyfit(height, radius, 1)
+    
     plt.plot(height,theta[0]*np.array(height)+theta[1])
     x_centres=[]
     y_centres=[]
@@ -274,7 +294,7 @@ def itemList(cog) :
 def estimate_sod_sdd(tcal, e2, vpiercing, mag):    
     pixelSize = 0.139
     R = 10
-    c0=itemList(findBeadsWS(tcal[0,:,:]))
+    c0=itemList(findBeadsWS(tcal[0,:,:])),
     sod = []
     sdd = [] 
     for idx in range(np.array(e2).shape[0]) :
@@ -288,10 +308,14 @@ def estimate_sod_sdd(tcal, e2, vpiercing, mag):
         sod.append(np.abs(est_sod))
         sdd.append(np.abs(est_sdd))
         #print("h: {0:0.3f}, S0D: {1:0.2f}, SDD: {2:0.2f}, magn: {3:0.2f}".format(h,est_sod, est_sdd,est_sdd/est_sod))
-
+    sd_sod= np.std(sod)
+    sd_sdd= np.std(sdd)
     sod = np.mean(sod)
     sdd = np.mean(sdd)
-
+    result = {'sod': sod, 'sdd': sdd, 'magnification': sdd/sod, 'sd_sod':sd_sod ,'sd_sdd': sd_sdd}
     print("Mean SOD= ", sod)
     print("Mean SDD= ", sdd)
     print("Magnification= ", sdd/sod)
+    print("Standard deviation in SOD= ", sd_sod)
+    print("Standard deviation in SDD= ", sd_sdd)
+    return result 
