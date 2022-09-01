@@ -85,33 +85,42 @@ def goldenCM(N,increment=1.0,s=0.5,v=0.7,bg=0) :
     return cm
 
 
-def watershed_segmentation_display(tcal, idx):
-    img = tcal[idx,:,:]
-    distance = ndi.distance_transform_edt(img)
-
-    h=2
-    localmax = h_maxima(distance,h)
-    rdmap    = distance.max()-distance
-    labels   = label(localmax)
-    ws1 = watershed(min_impose(rdmap,labels),labels,mask=img)
+def watershed_segmentation_display(img):
+    cog,ws1=findBeadsWS(img)
+    
+    labels = np.unique(ws1).astype(int)
+    
     fig,ax=plt.subplots(1,1,figsize=(10,10))
     ax.imshow(ws1,interpolation='None',cmap=goldenCM(labels.max()))
-    
+    ax.plot(cog[:,1],cog[:,0],'r+')
 
 def findBeadsWS(img, selem= disk(3),h=2) :
-    distance = ndi.distance_transform_edt(erode(img,selem))
+    p=img.mean(axis=0)
+    m=np.where((0.5*p.max())<p)
+    a=np.min(m)
+    b=np.max(m)
+    w=b-a
+    a=a-w
+    b=b+w
+    if a<0 : a=0
+    if len(p)<=b : b=len(p)-1
+    img2=img[:,a:b]
+    distance = ndi.distance_transform_edt(erode(img2,selem))
 
     localmax = h_maxima(distance,h)
     rdmap    = distance.max()-distance
     labels   = label(localmax)
-    ws1 = watershed(min_impose(rdmap,labels),labels,mask=img)
+    ws1 = watershed(min_impose(rdmap,labels),labels,mask=img2)
     
     rp = regionprops_table(ws1,properties=('area','centroid'))
        
     cog=np.zeros([rp['centroid-0'].shape[0],2])
     cog[:,0]=rp['centroid-0']
-    cog[:,1]=rp['centroid-1']
-    return cog
+    cog[:,1]=rp['centroid-1']+a
+    ws = np.zeros(img.shape)
+    ws[:,a:b] = ws1
+
+    return cog,ws
 
 def buildBeadList(img,selem=disk(12),c=1.96) :
     beadlist = []
@@ -139,7 +148,17 @@ def display_beads(tcal, idx):
     plt.plot(cog2[:,1]-1,cog2[:,0]-1,'ro')
     
     
-def identifyEllipses(img,selem=disk(2)) :
+def getBeads(img,selem=disk(2)) :
+    N=img.shape[0]
+  
+    beads = []
+    
+    for proj in tqdm(np.arange(0,N)) :
+        cog,_ = findBeadsWS(img[proj,:,:])
+        beads.append(cog)
+    return beads
+
+def identifyEllipses_old(img,selem=disk(2)) :
     N=img.shape[0]
     ellipses = []
     params=[]
@@ -170,9 +189,45 @@ def identifyEllipses(img,selem=disk(2)) :
         params.append([yc,xc,max(a,b),min(a,b),theta])
     return params,cog_allbeads
 
+def identifyEllipses(img,selem=disk(2), beads=None) :
+    N=img.shape[0]
+    
+    ellipses = []
+    params=[]
+    cog_allbeads=[]  
+    res = []
+    if beads is None :
+        beads = getBeads(img,selem)
+    
+    for idx in range(len(min(beads,key=len))):
+        ellipse = []
+        for p in range(N) :
+            ellipse.append(beads[p][idx,:].tolist())
+        ellipses.append(np.array(ellipse))
+        ell = EllipseModel()
+        a_ellipse = np.array(ellipse)
+        ell.estimate(a_ellipse)
+        if ell.params==None:
+            continue
+        cog_onebead=[]
+        r=ell.residuals(a_ellipse)
+        res.append(4)
+        
+        sort=np.argsort(r)
+        
+        ell.estimate(a_ellipse[sort[:len(sort)//2],:])
+        for p in range(N) :
+            cog_onebead.append(beads[p][idx,:])
+        cog_allbeads.append(cog_onebead)
+        xc, yc, a, b, theta = ell.params
+        if theta> 1:
+            theta=theta-(np.pi/2)
+        params.append([yc,xc,max(a,b),min(a,b),theta])
+    return params,cog_allbeads,res
 
 def show_ellipses(e2,cog_allbeads):
-    for idx in range(len(min(cog_allbeads,key=len))):
+    #for idx in range(len(min(cog_allbeads,key=len))):
+    for idx in range(len(e2)):
         print("ID Number = ", idx)
         print("center = ",  (e2[idx][0], e2[idx][1]))
         theta=e2[idx][4]
@@ -181,8 +236,10 @@ def show_ellipses(e2,cog_allbeads):
         a_ellipse=np.array(cog_allbeads[idx])
         x=a_ellipse[:,0]
         y=a_ellipse[:,1]
-        fig, axs = plt.subplots(2, 1, sharex=True, sharey=True)
+        fig, axs = plt.subplots(1,2, figsize=(15,4),sharex=True, sharey=True)
         axs[0].scatter(y, x)
+        for (num,(yy,xx)) in enumerate(zip(y,x)) :
+            axs[0].annotate("{0}".format(num),xy=(yy,xx),  xycoords='data')
 
         axs[1].scatter(y, x)
         axs[1].scatter(e2[idx][0], e2[idx][1], color='red', s=100)
@@ -199,10 +256,16 @@ def estimate_cor(e2):
     for i in range(len(e2)):
         x_centres.append(e2[i][0])
         y_centres.append(e2[i][1])
+        
+    x_centres=np.array(x_centres)
+    y_centres=np.array(y_centres)
     theta=np.polyfit(y_centres, x_centres, 1)
-                
-    plt.scatter(y_centres,x_centres)
-    plt.plot(theta[1]+theta[0]*np.array(y_centres),x_centres ,'r')
+    res= np.abs(theta[1]+theta[0]*np.array(y_centres)-x_centres)
+    idx = np.where(res<(res.mean()+res.std()))
+    theta=np.polyfit(y_centres[idx[0]], x_centres[idx[0]], 1)
+    
+    plt.scatter(x_centres,y_centres)
+    plt.plot(theta[1]+theta[0]*np.array(y_centres), y_centres ,'r')
     plt.show()
     print("The parameters of the COR obtained are as follows:",(theta[1]))
     tilt = np.arctan(theta[0])*180/np.pi
@@ -211,7 +274,7 @@ def estimate_cor(e2):
     return result
     
 def estimate_magnification(tcal,idx):
-    cog=findBeadsWS(tcal[idx,:,:])
+    cog,_=findBeadsWS(tcal[idx,:,:])
     pixel_pitch=0.139
     d=np.sort(np.diff(cog[:,0]))
     m=d[6:-6].mean()
@@ -291,23 +354,32 @@ def itemList(cog) :
         
     return idxList
    
-def estimate_sod_sdd(tcal, e2, vpiercing, mag):    
+def estimate_sod_sdd(tcal, e2, vpiercing, mag, factor=1.08):    
     pixelSize = 0.139
     R = 10
-    c0=itemList(findBeadsWS(tcal[0,:,:])),
+    e0,_=findBeadsWS(tcal[0,:,:])
+    c0=itemList(e0)
     sod = []
     sdd = [] 
     for idx in range(np.array(e2).shape[0]) :
-        ha=(e2[idx][1]-e2[idx][3]-vpiercing) * pixelSize
-        hb=(e2[idx][1]+e2[idx][3]-vpiercing) * pixelSize
         h=0
-        if idx in c0 :
-            h = (c0[idx][1]-vpiercing)*pixelSize
-        est_sod= (hb+ha)*R*1.08/(hb-ha)
+        if e2[idx][1] < vpiercing :
+            hb=(vpiercing - (e2[idx][1]-e2[idx][3])) * pixelSize
+            ha=(vpiercing - (e2[idx][1]+e2[idx][3])) * pixelSize
+            if idx in c0 :
+                h = (vpiercing - c0[idx][1])*pixelSize
+        else :
+            ha=(e2[idx][1]-e2[idx][3]-vpiercing) * pixelSize
+            hb=(e2[idx][1]+e2[idx][3]-vpiercing) * pixelSize
+            if idx in c0 :
+                h = (c0[idx][1]-vpiercing)*pixelSize
+
+
+        est_sod= (hb+ha)*R*factor/(hb-ha)
         est_sdd= (est_sod)*mag
         sod.append(np.abs(est_sod))
         sdd.append(np.abs(est_sdd))
-        #print("h: {0:0.3f}, S0D: {1:0.2f}, SDD: {2:0.2f}, magn: {3:0.2f}".format(h,est_sod, est_sdd,est_sdd/est_sod))
+        print("h: {0:0.3f}, SOD: {1:0.2f}, SDD: {2:0.2f}, magn: {3:0.2f}, ha: {4:0.2f}, hb: {5:0.2f}".format(h,est_sod, est_sdd,est_sdd/est_sod,ha,hb))
     sd_sod= np.std(sod)
     sd_sdd= np.std(sdd)
     sod = np.mean(sod)
@@ -318,4 +390,5 @@ def estimate_sod_sdd(tcal, e2, vpiercing, mag):
     print("Magnification= ", sdd/sod)
     print("Standard deviation in SOD= ", sd_sod)
     print("Standard deviation in SDD= ", sd_sdd)
+    print("Pixel size= ", pixelSize/mag)
     return result 
