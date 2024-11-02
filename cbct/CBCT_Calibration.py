@@ -4,13 +4,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image as pil
 import skimage as im
+
+from scipy.signal import medfilt
 from skimage.filters import threshold_otsu
 from skimage.segmentation import watershed
 from skimage.segmentation import clear_border
-from skimage.morphology import binary_erosion as erode
-
-from skimage.morphology import binary_dilation as dilate
-from skimage.morphology import binary_opening as opening
+from skimage.morphology import dilation
+from skimage.morphology import binary_opening
 from skimage.morphology import disk
 from skimage.morphology import h_maxima
 from skimage.morphology import label
@@ -40,7 +40,7 @@ class CBCTCalibration:
         self.beads               = None
         self.calibration         = {"COR" : None, "SDD" : None, "SOD" : None, "pp": None}
 
-    def set_projections(self, proj,ob,dc, verticalflip=False, show=False):
+    def set_projections(self, proj,ob,dc, verticalflip=False, show=False, amplification=10, stack_window=5):
         ob = ob-dc
         ob[ob<=0] = 1
 
@@ -58,7 +58,8 @@ class CBCTCalibration:
         if show:
             plt.imshow(self.projections[0],vmin=0,vmax=1)
 
-        self.remove_projection_baseline(show=show)
+        # self.remove_projection_baseline(show=show)
+        self.flatten_projections(amplification=amplification, stack_window=stack_window,show=show)
 
     def remove_projection_baseline(self, show=False):
 
@@ -77,6 +78,31 @@ class CBCTCalibration:
             ax[0].imshow(self.projections_flat[0],vmin=-0.1,vmax=1)  
             ax[1].plot(self.histogram[1][0:-1],self.histogram[0])
             ax[1].set_yscale('log')
+
+
+    def flatten_projections(self,amplification=10,stack_window=5, show=False):
+        """ Detrends the projection of the cylinder 
+
+        Arguments:
+        - proj: a stack of projections
+        - amplication: the amplification factor of the median correction to remove the edge effect of the cylinder
+        - stack_window: the window size for the max operation in the stack direction
+        """
+        d = dilation(self.projections,footprint=np.ones((stack_window,1,1)))
+        self.projections_flat = d - self.projections
+        m=np.median(self.projections_flat,axis=0)
+        #flatten projection
+        for i in range(self.projections.shape[0]):
+            self.projections_flat[i] = self.projections_flat[i] - amplification*m
+
+        self.histogram = np.histogram(self.projections_flat.flatten(), bins=1000)
+
+        if show:
+            _,ax = plt.subplots(1,2,figsize=(10,5))
+            ax[0].imshow(self.projections_flat[0],vmin=-0.1,vmax=1)  
+            ax[1].plot(self.histogram[1][0:-1],self.histogram[0])
+            ax[1].set_yscale('log')
+            
     
 
     def show_histogram(self):
@@ -84,7 +110,7 @@ class CBCTCalibration:
         plt.yscale('log')
         plt.show()
     
-    def threshold_projections(self, threshold, show=False, clearborder=False):
+    def threshold_projections(self, threshold, show=False, cleanmethod='median',clearborder=False):
         """
         Apply a threshold to the flattened projections to create a bilevel image.
         
@@ -94,8 +120,16 @@ class CBCTCalibration:
 
         # Morphological operations
         kernel_size = 5
-        for (idx,proj) in enumerate(self.projections_bilevel):
-            self.projections_bilevel[idx] = opening(proj, disk(kernel_size))
+        if cleanmethod == 'median':
+            for (idx,proj) in enumerate(self.projections_bilevel):
+                self.projections_bilevel[idx] = medfilt(proj,kernel_size=(kernel_size,kernel_size))
+
+        elif cleanmethod == 'opening':
+            for (idx,proj) in enumerate(self.projections_bilevel):
+                self.projections_bilevel[idx] = binary_opening(proj, disk(kernel_size))
+
+        else :
+            raise ValueError(f"Invalid cleanmethod: {cleanmethod}")
 
         # Clean items connected to the border
         if clearborder:
