@@ -146,11 +146,34 @@ class CBCTCalibration:
             plt.imshow(self.projections_bilevel[idx],interpolation='none')
         plt.show()
 
-    def find_beads(self, min_distance=5, show=False):
+    def reduce_segments(self,signal):
+        reduced_signal = np.zeros_like(signal)
+        if len(signal) == 0:
+            return reduced_signal
+        
+        reduced_signal[0] = signal[0]
+        for i in range(1, len(signal)):
+            if signal[i] == 1 and signal[i-1] == 0:
+                reduced_signal[i] = 1
+        return reduced_signal
+    
+    def breakup_beads(self, img, threshold=1):
+        p = img.sum(axis=1)
+        m = p.mean()
+        s = p.std()
+        g = (1-self.reduce_segments(p<(m-threshold*s))).reshape(-1,1)
+    
+        g2 =np.matmul(g, np.ones((1,img.shape[1])))
+
+        return img*g2
+    
+    def find_beads(self, min_distance=5, breakup=False, breakup_threshold=1, show=False):
         self.beads = []
-        for (idx,proj) in enumerate(self.projections_bilevel):
-            lbl = label(proj)
-            rp = regionprops(lbl,intensity_image=self.projections_flat[idx])  
+        for (idx,(biproj,flat)) in enumerate(zip(self.projections_bilevel,self.projections_flat)):
+            if breakup :
+                biproj = self.breakup_beads(biproj,threshold=breakup_threshold)
+            lbl = label(biproj)
+            rp = regionprops(lbl,intensity_image=flat)  
             for region in rp:
                 if region.area>20:
                     self.beads.append({"idx" : idx, "label" : region.label, "centroid" :np.array([region.centroid_weighted[0],region.centroid_weighted[1]])})
