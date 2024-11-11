@@ -24,9 +24,26 @@ from skimage.measure import EllipseModel
 from skimage.measure import regionprops
 from matplotlib.patches import Ellipse
 import uncertainties as un
+from uncertainties import umath
 import cv2
 from scipy.stats import scoreatpercentile
 from scipy.optimize import curve_fit, minimize
+
+from scipy.stats import ortho_group
+from matplotlib.colors import ListedColormap
+from skimage.color      import hsv2rgb, rgb2hsv
+
+
+
+def randomCM(N, low=0.2, high=1.0,seed=42, bg=0) :
+    np.random.seed(seed=seed)
+    clist=np.random.uniform(low=low,high=high,size=[N,3]); 
+    m = ortho_group.rvs(dim=3)
+    if bg is not None : clist[0,:]=bg;
+        
+    rmap = ListedColormap(clist)
+    
+    return rmap
 
 
 class CBCTCalibration:
@@ -62,6 +79,7 @@ class CBCTCalibration:
         self.flatten_projections(amplification=amplification, stack_window=stack_window,show=show)
 
     def remove_projection_baseline(self, show=False):
+        
 
         self.projections_flat = np.copy(self.projections)
         b2 = np.median(self.projections,axis=0)
@@ -110,6 +128,21 @@ class CBCTCalibration:
         plt.yscale('log')
         plt.show()
     
+    def mask_beads(self,img,margin=10):
+        p = img.mean(axis=0)
+        th = (p.max()-p.min() )/4 + p.min()
+
+        w=np.where(th<p)
+        res=np.copy(img)
+        if len(w[0])!=0:
+            minp = np.minimum(0,np.min(w)-margin)
+            maxp = np.minimum(img.shape[1],np.max(w)+margin)
+        
+            res[:,0:minp] = 0
+            res[:,maxp:]  = 0
+            
+        return res  
+    
     def threshold_projections(self, threshold, show=False, cleanmethod='median',clearborder=False):
         """
         Apply a threshold to the flattened projections to create a bilevel image.
@@ -131,6 +164,9 @@ class CBCTCalibration:
         else :
             raise ValueError(f"Invalid cleanmethod: {cleanmethod}")
 
+        for (idx,proj) in enumerate(self.projections_bilevel):
+            self.projections_bilevel[idx] = self.mask_beads(proj)
+
         # Clean items connected to the border
         if clearborder:
             for (idx,proj) in enumerate(self.projections_bilevel):
@@ -146,24 +182,48 @@ class CBCTCalibration:
             plt.imshow(self.projections_bilevel[idx],interpolation='none')
         plt.show()
 
-    def reduce_segments(self,signal):
+    # def reduce_segments(self,signal):
+    #     reduced_signal = np.zeros_like(signal)
+    #     if len(signal) == 0:
+    #         return reduced_signal
+        
+    #     reduced_signal[0] = signal[0]
+    #     for i in range(1, len(signal)):
+    #         if signal[i] == 1 and signal[i-1] == 0:
+    #             reduced_signal[i] = 1
+    #     return reduced_signal
+    
+    def reduce_segments(self, signal):
         reduced_signal = np.zeros_like(signal)
         if len(signal) == 0:
             return reduced_signal
-        
-        reduced_signal[0] = signal[0]
-        for i in range(1, len(signal)):
-            if signal[i] == 1 and signal[i-1] == 0:
-                reduced_signal[i] = 1
+
+        start = -1
+        for i in range(len(signal)):
+            if signal[i] == 1 and start == -1:
+                start = i
+            elif signal[i] == 0 and start != -1:
+                middle = (start + i - 1) // 2
+                reduced_signal[middle] = 1
+                start = -1
+
+        # Handle the case where the signal ends with a segment of ones
+        if start != -1:
+            middle = (start + len(signal) - 1) // 2
+            reduced_signal[middle] = 1
+
         return reduced_signal
     
-    def breakup_beads(self, img, threshold=1):
+    def breakup_beads(self, img, threshold=1, lbl=True):
         p = img.sum(axis=1)
         m = p.mean()
         s = p.std()
         g = (1-self.reduce_segments(p<(m-threshold*s))).reshape(-1,1)
     
-        g2 =np.matmul(g, np.ones((1,img.shape[1])))
+        if lbl:
+            g = label(g)
+
+        g2 =np.matmul(g, np.ones((1,img.shape[1]))).astype(int)
 
         return img*g2
     
@@ -171,8 +231,10 @@ class CBCTCalibration:
         self.beads = []
         for (idx,(biproj,flat)) in enumerate(zip(self.projections_bilevel,self.projections_flat)):
             if breakup :
-                biproj = self.breakup_beads(biproj,threshold=breakup_threshold)
-            lbl = label(biproj)
+                lbl = self.breakup_beads(biproj,threshold=breakup_threshold,lbl=True)
+            else :
+                lbl = label(biproj)
+
             rp = regionprops(lbl,intensity_image=flat)  
             for region in rp:
                 if region.area>20:
@@ -190,6 +252,24 @@ class CBCTCalibration:
             plt.plot(bead['centroid'][1],bead['centroid'][0],'r.')
         plt.show()
 
+    def prune_trajectories(self,traj, threshold=1):
+        """Prune trajectories based on the distance between consecutive points."""
+        
+        res = []
+        for idx,t in enumerate(traj):
+            if t.shape[0] > 5:
+                tt = np.concatenate((t,t,t))
+                bt=np.abs(tt[:,0]-medfilt(tt[:,0],5))
+                bt=bt[t.shape[0]:2*t.shape[0]]
+                print(t.shape,bt.shape)
+                m=np.mean(bt)
+                s=np.std(bt)
+                
+                t=t[bt < m+threshold*s,:]
+                res.append(t)
+
+        return res  
+    
     def find_trajectories(self, show=False):
         """
         Find trajectories of the beads
@@ -210,6 +290,89 @@ class CBCTCalibration:
 
         for idx in range(len(self.trajectories)):
             self.trajectories[idx] = np.array(self.trajectories[idx])
+
+        self.trajectories = self.prune_trajectories(self.trajectories, threshold=1)
+
+        if show:    
+            self.show_trajectories()
+
+    def show_trajectories(self):
+        """
+        Show the trajectories of the beads
+        """
+        _, ax = plt.subplots(figsize=(5,6))
+        plt.imshow(self.projections_bilevel.max(axis=0),interpolation='none')
+
+        # cmap   = plt.get_cmap('tab20')
+        # colors = cmap(np.linspace(0, 1, len(self.trajectories)))
+        
+        cmap = randomCM(len(self.trajectories),bg=[0,0,0])
+        colors = cmap(np.linspace(0, 1, len(self.trajectories)))
+        for idx,trajectory in enumerate(self.trajectories):
+            if trajectory.shape[0]>5:
+                ax.plot(trajectory[:,1],trajectory[:,0],'.', color=colors[idx])
+
+    # converting the coefficients to ellipse parameters
+    def fit(self,x, y):
+        # Convert x and y to float type if they are not already
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+
+        D1 = np.vstack([x**2, x*y, y**2]).T
+        D2 = np.vstack([x, y, np.ones_like(x)]).T
+        S1 = D1.T @ D1
+        S2 = D1.T @ D2
+        S3 = D2.T @ D2
+        C1 = np.array([[0, 0, 2], [0, -1, 0], [2, 0, 0]], dtype=float)
+
+        # Attempt to invert S3 with safe handling for singular matrices
+        try:
+            S3_inv = np.linalg.inv(S3)
+        except np.linalg.LinAlgError:
+            print("Warning: S3 is singular, using pseudo-inverse.")
+            S3_inv = np.linalg.pinv(S3)
+
+        M = np.linalg.inv(C1) @ (S1 - S2 @ S3_inv @ S2.T)
+
+        # Eigenvalue decomposition
+        eig_vals, eig_vecs = np.linalg.eig(M)
+        cond = 4 * eig_vecs[0, :] * eig_vecs[2, :] - eig_vecs[1, :]**2
+        valid_idx = np.where(cond > 0)[0]
+
+        if valid_idx.size == 0:
+            print("No valid ellipse found.")
+            return None
+
+        a1 = eig_vecs[:, valid_idx]
+        return np.vstack([a1, np.linalg.solve(-S3, S2.T @ a1)]).flatten()
+    
+    def errors(self, x, y, coeffs):
+        z = np.vstack((x**2, x*y, y**2, x, y, np.ones_like(x)))
+        if coeffs.size == 12:
+            coeffs = coeffs.reshape(2, 6)
+        elif coeffs.size == 6:
+            coeffs = coeffs.reshape(1, 6)
+        numerator = np.sum(((coeffs @ z) - 1)**2)
+        denominator = (len(x) - 6) * np.sum(z**2, axis=1)
+        unc = np.sqrt(numerator / denominator)
+        return tuple(ufloat(i, j) for i, j in zip(coeffs.flatten(), unc))
+
+    def convert_ellipse_parameters(self,coeffs):
+        a,b,c,d,e,f = coeffs
+        b /= 2
+        d /= 2
+        e /= 2
+        x0 = (c*d - b*e) / (b**2 - a*c)
+        y0 = (a*e - b*d) / (b**2 - a*c)
+        center = (x0, y0)
+        numerator = 2 * (a*e**2 + c*d**2 + f*b**2 - 2*b*d*e - a*c*f)
+        denominator1 = (b*b-a*c)*((c-a)*umath.sqrt(1+4*b*b/((a-c)*(a-c)))-(c+a))
+        denominator2 = (b*b-a*c)*((a-c)*umath.sqrt(1+4*b*b/((a-c)*(a-c)))-(c+a))
+        major = umath.sqrt(numerator/denominator1) if numerator/denominator1 > 0 else 0
+        minor = umath.sqrt(numerator/denominator2) if numerator/denominator2 > 0 else 0
+        phi = .5*umath.atan((2*b)/(a-c))
+        major, minor, phi = (major, minor, phi) if major > minor else (minor, major, np.pi/2+phi)
+        return center, major, minor, phi
 
     def fit_ellipses(self, show=False, prune=True):
         """
@@ -285,7 +448,9 @@ class CBCTCalibration:
         ax.set_xlim(0,self.projections[0].shape[1])
         ax.set_ylim(0,self.projections[0].shape[0])
 
-        cmap   = plt.get_cmap('tab20')
+        # cmap   = plt.get_cmap('tab20')
+        # colors = cmap(np.linspace(0, 1, len(self.ellipses)))
+        cmap = randomCM(len(self.ellipses),bg=[0,0,0])
         colors = cmap(np.linspace(0, 1, len(self.ellipses)))
         
         for idx,ellipse in enumerate(self.ellipses):
