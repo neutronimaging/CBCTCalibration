@@ -124,6 +124,9 @@ class CBCTCalibration:
     
 
     def show_histogram(self):
+        """
+        Show the histogram of the flattened projections. This is only a display function.
+        """
         plt.plot(self.histogram[1][0:-1],self.histogram[0])
         plt.yscale('log')
         plt.show()
@@ -182,17 +185,6 @@ class CBCTCalibration:
             plt.imshow(self.projections_bilevel[idx],interpolation='none')
         plt.show()
 
-    # def reduce_segments(self,signal):
-    #     reduced_signal = np.zeros_like(signal)
-    #     if len(signal) == 0:
-    #         return reduced_signal
-        
-    #     reduced_signal[0] = signal[0]
-    #     for i in range(1, len(signal)):
-    #         if signal[i] == 1 and signal[i-1] == 0:
-    #             reduced_signal[i] = 1
-    #     return reduced_signal
-    
     def reduce_segments(self, signal):
         reduced_signal = np.zeros_like(signal)
         if len(signal) == 0:
@@ -253,7 +245,11 @@ class CBCTCalibration:
         plt.show()
 
     def prune_trajectories(self,traj, threshold=1):
-        """Prune trajectories based on the distance between consecutive points."""
+        """
+        Prune trajectories based on the distance between consecutive points.
+        
+        :param traj: List of trajectories
+        """
         
         res = []
         for idx,t in enumerate(traj):
@@ -261,7 +257,6 @@ class CBCTCalibration:
                 tt = np.concatenate((t,t,t))
                 bt=np.abs(tt[:,0]-medfilt(tt[:,0],5))
                 bt=bt[t.shape[0]:2*t.shape[0]]
-                print(t.shape,bt.shape)
                 m=np.mean(bt)
                 s=np.std(bt)
                 
@@ -275,7 +270,6 @@ class CBCTCalibration:
         Find trajectories of the beads
 
         :param show: Show the trajectories
-
         """
 
         maxlabel = 0
@@ -477,7 +471,8 @@ class CBCTCalibration:
         self._compute_distances(diameter        = diameter, 
                                 pixelsize       = pixelsize,
                                 remove_outliers = remove_outliers,
-                                avgtype         = avgtype)
+                                avgtype         = avgtype,
+                                show=show)
 
         if show:
             self.show_calibration()
@@ -508,43 +503,49 @@ class CBCTCalibration:
         lower_bound = median - 0.25 * iqr
         
         return data[(data >= lower_bound) & (data <= upper_bound)]
-
-    def _compute_distances(self, diameter, pixelsize, avgtype='mean',epsilon=1e-7, remove_outliers=True):
+    
+    def _compute_distances(self, diameter, pixelsize, avgtype='mean',epsilon=1e-7, remove_outliers=True, show=False):
         """ 
         Compute the SOD and SDD distances of the cone beam system
         """
         pixelSize = pixelsize   # mm
-        D         = diameter    # 50 mm for new calibration sample
+        R = diameter / 2
+        cte = pixelSize / R
 
         x_centers  = np.array([ellipse["ellipse"]["xy"][0]  for ellipse in self.ellipses])
         y_centers  = np.array([ellipse["ellipse"]["xy"][1]  for ellipse in self.ellipses])
         minor_axes = np.array([ellipse["ellipse"]["height"] for ellipse in self.ellipses])/2 # we want the radius
         major_axes = np.array([ellipse["ellipse"]["width"]  for ellipse in self.ellipses])
-        angles     = np.array([ellipse["ellipse"]["angle"]  for ellipse in self.ellipses])   
+        angles     = np.array([ellipse["ellipse"]["angle"]  for ellipse in self.ellipses])*np.pi/180
         hpiercing  = self.calibration["pp"]["y"]  # Piercing point
 
         # Sample data (assuming y_centers, minor_axes, angles, and vpiercing are defined)
         sod = []
         sdd = []
         mag = []
+        pixelSize = pixelsize
+        for idx in range(x_centers.shape[0]):
+            if y_centers[idx] < hpiercing:
+                ha = (y_centers[idx] - (minor_axes[idx] * np.cos(angles[idx])) - hpiercing)
+                hb = (y_centers[idx] + (minor_axes[idx] * np.cos(angles[idx])) - hpiercing)
+            else:
+                hb = (y_centers[idx] - (minor_axes[idx] * np.cos(angles[idx])) - hpiercing)
+                ha = (y_centers[idx] + (minor_axes[idx] * np.cos(angles[idx])) - hpiercing)
 
-        for y,minor_axis,angle in zip(y_centers,minor_axes,angles):
-            ha = ((y - (minor_axis * np.cos(angle)) - hpiercing)) 
-            hb = ((y + (minor_axis * np.cos(angle)) - hpiercing)) 
-            est_sod = (hb + ha) * 0.5* D / ((hb - ha) + epsilon)
-            sod.append(np.abs(est_sod))
-     
+            
+            est_sod = (hb + ha) * R / ((hb - ha) + 1e-10)
+            
+            M = cte * major_axes[idx] /2
+            sdd_each_elipse = M * est_sod
+            sdd.append(sdd_each_elipse)
+            mag.append(M)
+            sod.append(est_sod)
+
+        # Convert sod, sdd, mag to numpy arrays
         sod = np.array([un.nominal_value(x) for x in sod])
-
-        mag = major_axes *pixelSize / D 
-        sdd = np.abs(mag * sod)
-
-        plt.plot(major_axes,y_centers,marker='o',linestyle='-')
-        plt.axhline(y=hpiercing,color='r')
-
         sdd = np.array([un.nominal_value(x) for x in sdd])
         mag = np.array([un.nominal_value(x) for x in mag])
-        
+
         if remove_outliers:
             sod_clean = self._remove_outliers(sod)
             sdd_clean = self._remove_outliers(sdd)
@@ -556,17 +557,31 @@ class CBCTCalibration:
 
         # average the values is ok as the variations are small and often look random
         if avgtype == 'mean':        
-            sod = np.mean(sod_clean)
-            sdd = np.mean(sdd_clean)
-            mag = np.mean(mag_clean)
+            sod_res = np.mean(sod_clean)
+            sdd_res = np.mean(sdd_clean)
+            mag_res = np.mean(mag_clean)
         else:
-            sod = np.median(sod_clean)
-            sdd = np.median(sdd_clean)
-            mag = np.median(mag_clean)
+            sod_res = np.median(sod_clean)
+            sdd_res = np.median(sdd_clean)
+            mag_res = np.median(mag_clean)
 
-        self.calibration["SOD"] = sod
-        self.calibration["SDD"] = sdd
-        self.calibration["MAG"] = mag
+        self.calibration["SOD"] = sod_res
+        self.calibration["SDD"] = sdd_res
+        self.calibration["MAG"] = mag_res
+
+        if show:
+            xx = np.zeros(len(sod))
+            plt.axvline(x=sdd_res,color=[0.5,0.5,0.5],linewidth=2)
+            plt.plot(sod,xx,'.',color='b',label='SOD',alpha=0.25)
+            plt.plot(sdd,xx,'.',color='g', label='SDD',alpha=0.25)
+            plt.plot(sdd_res,1,'o',color='g',label='Final SDD: {0:0.02f}'.format(sdd_res))
+            plt.plot(sod_res,1,'o',color='b',label='Final SOD: {0:0.02f}'.format(sod_res))
+            plt.plot([sdd_res,0,sdd_res],[150,0,-150],'--',color='g')
+            plt.axhline(y=0,color='r',linewidth=0.5) 
+            plt.xlabel('Distance [mm]')
+            plt.ylabel('Detector position [mm]')
+            plt.title('SOD and SDD')
+            plt.legend()
 
     def _compute_piercing_point(self):
         """
