@@ -76,7 +76,6 @@ class CBCTCalibration:
             plt.imshow(self.projections[0],vmin=0,vmax=1)
 
         # self.remove_projection_baseline(show=show)
-        self.flatten_projections(amplification=amplification, stack_window=stack_window,show=show)
 
     def remove_projection_baseline(self, show=False):
         
@@ -98,7 +97,7 @@ class CBCTCalibration:
             ax[1].set_yscale('log')
 
 
-    def flatten_projections(self,amplification=10,stack_window=5, show=False):
+    def flatten_projections(self,amplification=1,stack_window=0, show=False):
         """ Detrends the projection of the cylinder 
 
         Arguments:
@@ -106,8 +105,13 @@ class CBCTCalibration:
         - amplication: the amplification factor of the median correction to remove the edge effect of the cylinder
         - stack_window: the window size for the max operation in the stack direction
         """
-        d = dilation(self.projections,footprint=np.ones((stack_window,1,1)))
-        self.projections_flat = d - self.projections
+       
+        if stack_window > 1:
+            d = dilation(self.projections,footprint=np.ones((stack_window,1,1)))
+            self.projections_flat = d - self.projections
+        else:
+            self.projections_flat = self.projections
+
         m=np.median(self.projections_flat,axis=0)
         #flatten projection
         for i in range(self.projections.shape[0]):
@@ -146,12 +150,29 @@ class CBCTCalibration:
             
         return res  
     
-    def threshold_projections(self, threshold, show=False, cleanmethod='median',clearborder=False):
+    def find_threshold(self, show=False):
+        """
+        Find the threshold value for the bilevel image
+        """
+        p=self.projections_flat[0,:].mean(axis=0)
+        m = p.mean()
+        s = p.std()
+        t = (p> m+3*s).reshape(1,-1)
+        one=np.ones((self.projections_flat[0,:].shape[0],1))
+        mask=np.matmul(one,t).astype(bool)
+        th = threshold_otsu(self.projections_flat[0,mask].ravel())
+
+        return th
+    
+    def threshold_projections(self, threshold=None, show=False, cleanmethod='median',clearborder=False):
         """
         Apply a threshold to the flattened projections to create a bilevel image.
         
         :param threshold: Threshold value to apply
         """
+        if threshold is None:
+            threshold = self.find_threshold()
+        
         self.projections_bilevel = (self.projections_flat > threshold).astype(int)
 
         # Morphological operations
@@ -437,6 +458,13 @@ class CBCTCalibration:
 
         self.ellipses = [ellipse for ellipse in self.ellipses if ellipse["ellipse"]["error"] < mean + 2*std]
 
+        major_axes = np.array([ellipse["ellipse"]["width"] for ellipse in self.ellipses])   
+        mean_major = np.mean(major_axes)
+        std_major  = np.std(major_axes)
+
+        self.ellipses = [ellipse for ellipse in self.ellipses if ellipse["ellipse"]["width"] < mean_major + 2*std_major]
+
+
     def show_ellipses(self):
         _, ax = plt.subplots(figsize=(5,6))
         ax.set_xlim(0,self.projections[0].shape[1])
@@ -535,7 +563,8 @@ class CBCTCalibration:
             
             est_sod = (hb + ha) * R / ((hb - ha) + 1e-10)
             
-            M = cte * major_axes[idx] /2
+            # M = cte * major_axes[idx] /(2)
+            M = cte * major_axes[idx] /(2*np.cos(angles[idx]))
             sdd_each_elipse = M * est_sod
             sdd.append(sdd_each_elipse)
             mag.append(M)
