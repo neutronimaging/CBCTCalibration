@@ -1,8 +1,0 @@
-format: jb-article
-root: introduction
-sections:
-- file: CurveFitting
-- file: ImshowScales
-- file: PlotLegends
-- file: PlottingFonts
-- file: HistogramRecipes
