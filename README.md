@@ -1,4 +1,5 @@
 # CBCTCalibration
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15222362.svg)](https://doi.org/10.5281/zenodo.15222362)
 
 ## Aim/Object: 
 To measure the geometry parameters from a sparse projection data set of a stack of
